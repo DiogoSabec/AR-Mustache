@@ -1,25 +1,20 @@
-using System.Collections;
-using System.Collections.Generic;
 using UnityEngine;
 using Unity.Barracuda;
 using UnityEngine.XR.ARFoundation;
 using UnityEngine.XR.ARSubsystems;
-using Unity.Collections;  // Add this line
-using Unity.Collections.LowLevel.Unsafe; // Add if using GetUnsafePtr()
+using System.Collections;
 using TMPro;
-
-
-
+using Unity.Collections; // For NativeArray and Allocator
 
 
 public class Emotion : MonoBehaviour
 {
-    public NNModel emotionModelAsset;
+    public NNModel emotionModelAsset;  // Assign your ONNX model here in the Inspector
     private Model emotionModel;
     private IWorker worker;
     private ARCameraManager cameraManager;
-    public TextMeshProUGUI emotionText; // Add this line
 
+    public TextMeshProUGUI emotionText;  // TextMeshPro text field for showing the emotion
 
     void Start()
     {
@@ -37,35 +32,24 @@ public class Emotion : MonoBehaviour
         worker.Dispose();
     }
 
-    private float timeSinceLastProcess = 0f;
-    public float processingInterval = 0.5f; // Process every 0.5 seconds
-
     void Update()
     {
-        timeSinceLastProcess += Time.deltaTime;
-        if (timeSinceLastProcess >= processingInterval)
+        // Check if we can get the latest camera image
+        if (cameraManager.TryAcquireLatestCpuImage(out XRCpuImage image))
         {
-            if (cameraManager.TryAcquireLatestCpuImage(out XRCpuImage image))
-            {
-                StartCoroutine(ProcessImage(image));
-                timeSinceLastProcess = 0f;
-            }
+            // Start a coroutine to process the image asynchronously
+            StartCoroutine(ProcessImage(image));
         }
     }
-
 
     IEnumerator ProcessImage(XRCpuImage image)
     {
         // Create conversion parameters
         var conversionParams = new XRCpuImage.ConversionParams
         {
-            // Get the full image
             inputRect = new RectInt(0, 0, image.width, image.height),
-            // Downsample to match model's input size (e.g., 64x64)
-            outputDimensions = new Vector2Int(64, 64),
-            // Choose format compatible with the model (e.g., Grayscale)
-            outputFormat = TextureFormat.R8,
-            // Mirror image vertically if needed
+            outputDimensions = new Vector2Int(64, 64),  // Adjust as per your model input size
+            outputFormat = TextureFormat.R8,  // Grayscale (or change based on your model)
             transformation = XRCpuImage.Transformation.MirrorY
         };
 
@@ -73,37 +57,36 @@ public class Emotion : MonoBehaviour
         int size = image.GetConvertedDataSize(conversionParams);
         var buffer = new NativeArray<byte>(size, Allocator.Temp);
 
-        // Convert the image directly into the buffer without using unsafe code
+        // Convert the image
         image.Convert(conversionParams, buffer);
 
         // Dispose the image as we don't need it anymore
         image.Dispose();
 
         // Create a Tensor from the image data
-        Tensor input = new Tensor(1, 64, 64, 1);
+        int width = conversionParams.outputDimensions.x;
+        int height = conversionParams.outputDimensions.y;
+        Tensor input = new Tensor(1, height, width, 1);
 
-        // Copy data from the buffer to the Tensor
-        for (int y = 0; y < 64; y++)
+        for (int y = 0; y < height; y++)
         {
-            for (int x = 0; x < 64; x++)
+            for (int x = 0; x < width; x++)
             {
-                // Get pixel value and normalize (if necessary)
-                float pixelValue = buffer[y * 64 + x] / 255f;
+                int pixelIndex = y * width + x;
+                float pixelValue = buffer[pixelIndex] / 255f;  // Normalize pixel value
                 input[0, y, x, 0] = pixelValue;
             }
         }
 
-        // Dispose of the buffer
         buffer.Dispose();
 
-        // Run the model
+        // Run the model with the input tensor
         worker.Execute(input);
-        Debug.Log("Model executed.");
 
-        // Get the output
+        // Get the output tensor
         Tensor output = worker.PeekOutput();
 
-        // Interpret the output
+        // Interpret the model output and update the UI
         InterpretModelOutput(output);
 
         // Dispose tensors
@@ -115,14 +98,16 @@ public class Emotion : MonoBehaviour
 
     private void InterpretModelOutput(Tensor output)
     {
-        // Get the index of the highest probability
-        int predictedEmotion = output.ArgMax()[1];
+        // Get the index of the highest probability (most likely emotion)
+        int predictedEmotion = output.ArgMax()[0];
 
         // Map the index to an emotion label
         string emotion = MapEmotion(predictedEmotion);
 
+        // Log the detected emotion
         Debug.Log("Detected Emotion: " + emotion);
 
+        // Update the TMP text element if available
         if (emotionText != null)
         {
             emotionText.text = "Emotion: " + emotion;
@@ -144,6 +129,7 @@ public class Emotion : MonoBehaviour
         }
         else
         {
+            Debug.LogWarning("Predicted emotion index out of range: " + predictedEmotion);
             return "Unknown";
         }
     }
